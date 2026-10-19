@@ -751,8 +751,6 @@ OnAcpiTableProtocolReady (
         "BC250DXEv3ACPIAutoInjectDxe: DSDT CSTUB patch failed: %r\n", Status));
     }
   } else {
-    ZeroMem (&mCstubDbg, sizeof (mCstubDbg));
-    SaveCstubDbg (30, EFI_UNSUPPORTED);
     DEBUG ((DEBUG_INFO, "BC250DXEv3ACPIAutoInjectDxe: DSDT CSTUB disabled (bit1 clear)\n"));
   }
 
