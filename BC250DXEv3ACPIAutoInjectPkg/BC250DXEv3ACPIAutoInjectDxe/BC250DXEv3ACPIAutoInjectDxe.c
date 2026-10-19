@@ -1,6 +1,7 @@
 #include <Uefi.h>
 
 #include <Guid/Acpi.h>
+#include <Guid/EventGroup.h>
 #include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
@@ -124,7 +125,8 @@ CountEnabledCores (
 STATIC
 EFI_STATUS
 GetAcpiPatchEnabled (
-  OUT BOOLEAN  *AcpiPatchEnabled
+  OUT BOOLEAN  *AcpiPatchEnabled,
+  OUT UINT8    *AcpiPatch
   )
 {
   EFI_STATUS   Status;
@@ -132,6 +134,9 @@ GetAcpiPatchEnabled (
   ACPI_CONFIG  Config;
 
   *AcpiPatchEnabled = FALSE;
+  if (AcpiPatch != NULL) {
+    *AcpiPatch = 0;
+  }
   ZeroMem (&Config, sizeof (Config));
 
   DataSize = sizeof (Config);
@@ -160,6 +165,9 @@ GetAcpiPatchEnabled (
     return Status;
   }
 
+  if (AcpiPatch != NULL) {
+    *AcpiPatch = Config.AcpiPatch;
+  }
   *AcpiPatchEnabled = (BOOLEAN)(Config.AcpiPatch != 0U);
   DEBUG ((DEBUG_INFO, "BC250DXEv3ACPIAutoInjectDxe: AcpiPatch=%u\n", Config.AcpiPatch));
   return EFI_SUCCESS;
@@ -214,6 +222,425 @@ InstallAcpiBlobSet (
   return EFI_SUCCESS;
 }
 
+//
+// DSDT namespace repair.
+//
+// Firmware SSDT1 ("AMD CPU") scopes \_PR.C000..C00F as Devices and attaches
+// _CST/_CSD, but the DSDT only defines Processor(P000..P00F), so the SSDT fails
+// to load with AE_NOT_FOUND.  Append inert Device stubs to a copy of the DSDT
+// and point the FADT at the copy, so SSDT1 resolves.  These stubs have a custom
+// HID (no driver binds, no extra CPUs); the functional P/C-state tables still
+// come from the P-processor SSDTs installed below.
+//
+#define BC250_ACPI_HEADER_SIZE       36U
+#define BC250_FADT_DSDT_OFFSET       40U
+#define BC250_FADT_X_DSDT_OFFSET     140U
+#define BC250_FADT_X_DSDT_MIN_LEN    148U
+#define BC250_DSDT_MAX_SIZE          (1024U * 1024U)
+
+STATIC BOOLEAN mDsdtCstubPatched = FALSE;
+
+STATIC
+VOID *
+FindAcpiRsdp (
+  VOID
+  )
+{
+  UINTN Index;
+  VOID  *Rsdp10;
+
+  Rsdp10 = NULL;
+  for (Index = 0; Index < gST->NumberOfTableEntries; ++Index) {
+    //
+    // The OS consumes the ACPI 2.0+ RSDP (XSDT).  The configuration table can
+    // also carry the legacy 1.0 entry, which may point at a different table
+    // copy, so prefer 2.0 and only fall back to 1.0.
+    //
+    if (CompareGuid (&gST->ConfigurationTable[Index].VendorGuid, &gEfiAcpi20TableGuid)) {
+      return gST->ConfigurationTable[Index].VendorTable;
+    }
+    if (CompareGuid (&gST->ConfigurationTable[Index].VendorGuid, &gEfiAcpiTableGuid)) {
+      Rsdp10 = gST->ConfigurationTable[Index].VendorTable;
+    }
+  }
+  return Rsdp10;
+}
+
+STATIC
+UINT8 *
+FindFadt (
+  IN VOID  *Rsdp
+  )
+{
+  UINT8   *Rsdp8;
+  UINT8   *Table;
+  UINT32  Length;
+  UINTN   Entries;
+  UINTN   Index;
+  UINT64  Entry;
+
+  Rsdp8 = (UINT8 *)Rsdp;
+  if (CompareMem (Rsdp8, "RSD PTR ", 8) != 0) {
+    return NULL;
+  }
+
+  if (Rsdp8[15] >= 2) {
+    Entry = ReadUnaligned64 (Rsdp8 + 24);
+    if (Entry != 0) {
+      Table = (UINT8 *)(UINTN)Entry;
+      if (CompareMem (Table, "XSDT", 4) == 0) {
+        Length = ReadUnaligned32 (Table + 4);
+        if (Length >= BC250_ACPI_HEADER_SIZE) {
+          Entries = (Length - BC250_ACPI_HEADER_SIZE) / 8;
+          for (Index = 0; Index < Entries; ++Index) {
+            Entry = ReadUnaligned64 (Table + BC250_ACPI_HEADER_SIZE + Index * 8);
+            if (Entry != 0 && CompareMem ((VOID *)(UINTN)Entry, "FACP", 4) == 0) {
+              return (UINT8 *)(UINTN)Entry;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  Entry = ReadUnaligned32 (Rsdp8 + 16);
+  if (Entry != 0) {
+    Table = (UINT8 *)(UINTN)Entry;
+    if (CompareMem (Table, "RSDT", 4) == 0) {
+      Length = ReadUnaligned32 (Table + 4);
+      if (Length >= BC250_ACPI_HEADER_SIZE) {
+        Entries = (Length - BC250_ACPI_HEADER_SIZE) / 4;
+        for (Index = 0; Index < Entries; ++Index) {
+          Entry = ReadUnaligned32 (Table + BC250_ACPI_HEADER_SIZE + Index * 4);
+          if (Entry != 0 && CompareMem ((VOID *)(UINTN)Entry, "FACP", 4) == 0) {
+            return (UINT8 *)(UINTN)Entry;
+          }
+        }
+      }
+    }
+  }
+
+  return NULL;
+}
+
+#pragma pack(1)
+typedef struct {
+  UINT32  Magic;
+  UINT32  Stage;
+  UINT32  Status;
+  UINT32  FadtLength;
+  UINT32  DsdtLength;
+  UINT32  NewLength;
+  UINT64  Rsdp;
+  UINT64  Fadt;
+  UINT64  Dsdt;
+  UINT64  NewDsdt;
+  UINT64  XDsdtReadBack;
+  UINT32  Dsdt32ReadBack;
+} BC250_CSTUB_DBG;
+#pragma pack()
+
+STATIC BC250_CSTUB_DBG mCstubDbg;
+
+STATIC
+VOID
+SaveCstubDbg (
+  IN UINT32      Stage,
+  IN EFI_STATUS  Status
+  )
+{
+  mCstubDbg.Magic  = 0x43535431U; // 'CST1'
+  mCstubDbg.Stage  = Stage;
+  mCstubDbg.Status = (UINT32)Status;
+  (VOID)gRT->SetVariable (
+               L"MeiMeiDXEv3AcpiDbg",
+               &mMeiMeiDXEv3ConfigVarGuid,
+               EFI_VARIABLE_BOOTSERVICE_ACCESS |
+               EFI_VARIABLE_RUNTIME_ACCESS |
+               EFI_VARIABLE_NON_VOLATILE,
+               sizeof (mCstubDbg),
+               &mCstubDbg
+               );
+}
+
+STATIC
+EFI_STATUS
+PatchDsdtCstub (
+  VOID
+  )
+{
+  EFI_STATUS            Status;
+  UINT32                Stage;
+  VOID                  *Rsdp;
+  UINT8                 *Fadt;
+  UINT32                FadtLength;
+  UINT64                DsdtAddress;
+  UINT8                 *Dsdt;
+  UINT32                DsdtLength;
+  UINT32                NewLength;
+  UINTN                 StubLength;
+  UINTN                 Pages;
+  EFI_PHYSICAL_ADDRESS  NewAddress;
+  UINT8                 *NewDsdt;
+  UINT32                Index;
+  UINT8                 Sum;
+  BOOLEAN               AlreadyPresent;
+
+  Status = EFI_SUCCESS;
+  Stage  = 0;
+  ZeroMem (&mCstubDbg, sizeof (mCstubDbg));
+
+  if (mDsdtCstubPatched) {
+    Stage = 20;
+    goto Done;
+  }
+  if (sizeof (gCstub) <= BC250_ACPI_HEADER_SIZE ||
+      CompareMem (gCstub, "SSDT", 4) != 0) {
+    DEBUG ((DEBUG_ERROR, "ACPIAutoInject: CSTUB blob malformed\n"));
+    Status = EFI_DEVICE_ERROR;
+    Stage  = 21;
+    goto Done;
+  }
+
+  Rsdp = FindAcpiRsdp ();
+  if (Rsdp == NULL) {
+    DEBUG ((DEBUG_WARN, "ACPIAutoInject: RSDP not found\n"));
+    Status = EFI_NOT_FOUND;
+    Stage  = 1;
+    goto Done;
+  }
+  mCstubDbg.Rsdp = (UINT64)(UINTN)Rsdp;
+
+  Fadt = FindFadt (Rsdp);
+  if (Fadt == NULL) {
+    DEBUG ((DEBUG_WARN, "ACPIAutoInject: FADT not found\n"));
+    Status = EFI_NOT_FOUND;
+    Stage  = 2;
+    goto Done;
+  }
+  mCstubDbg.Fadt = (UINT64)(UINTN)Fadt;
+
+  FadtLength = ReadUnaligned32 (Fadt + 4);
+  mCstubDbg.FadtLength = FadtLength;
+  if (FadtLength < 44) {
+    Status = EFI_DEVICE_ERROR;
+    Stage  = 3;
+    goto Done;
+  }
+  DsdtAddress = 0;
+  if (FadtLength >= BC250_FADT_X_DSDT_MIN_LEN) {
+    DsdtAddress = ReadUnaligned64 (Fadt + BC250_FADT_X_DSDT_OFFSET);
+  }
+  if (DsdtAddress == 0) {
+    DsdtAddress = ReadUnaligned32 (Fadt + BC250_FADT_DSDT_OFFSET);
+  }
+  if (DsdtAddress == 0) {
+    Status = EFI_DEVICE_ERROR;
+    Stage  = 4;
+    goto Done;
+  }
+  mCstubDbg.Dsdt = DsdtAddress;
+
+  Dsdt = (UINT8 *)(UINTN)DsdtAddress;
+  if (CompareMem (Dsdt, "DSDT", 4) != 0) {
+    Status = EFI_DEVICE_ERROR;
+    Stage  = 5;
+    goto Done;
+  }
+  DsdtLength = ReadUnaligned32 (Dsdt + 4);
+  mCstubDbg.DsdtLength = DsdtLength;
+  if (DsdtLength < BC250_ACPI_HEADER_SIZE || DsdtLength > BC250_DSDT_MAX_SIZE) {
+    Status = EFI_DEVICE_ERROR;
+    Stage  = 6;
+    goto Done;
+  }
+
+  AlreadyPresent = FALSE;
+  for (Index = 0; Index + 4 <= DsdtLength; ++Index) {
+    if (Dsdt[Index] == 'C' && Dsdt[Index + 1] == '0' &&
+        Dsdt[Index + 2] == '0' && Dsdt[Index + 3] == '0') {
+      AlreadyPresent = TRUE;
+      break;
+    }
+  }
+  if (AlreadyPresent) {
+    DEBUG ((DEBUG_INFO, "ACPIAutoInject: DSDT already defines C000, skipping CSTUB\n"));
+    mDsdtCstubPatched = TRUE;
+    Stage = 7;
+    goto Done;
+  }
+
+  StubLength = sizeof (gCstub) - BC250_ACPI_HEADER_SIZE;
+  NewLength  = DsdtLength + (UINT32)StubLength;
+  Pages      = EFI_SIZE_TO_PAGES (NewLength);
+  NewAddress = 0xFFFFFFFFULL;
+  Status = gBS->AllocatePages (AllocateMaxAddress, EfiACPIMemoryNVS, Pages, &NewAddress);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_WARN, "ACPIAutoInject: DSDT allocation failed: %r\n", Status));
+    Stage = 8;
+    goto Done;
+  }
+  mCstubDbg.NewDsdt   = (UINT64)NewAddress;
+  mCstubDbg.NewLength = NewLength;
+
+  NewDsdt = (UINT8 *)(UINTN)NewAddress;
+  CopyMem (NewDsdt, Dsdt, DsdtLength);
+  CopyMem (NewDsdt + DsdtLength, gCstub + BC250_ACPI_HEADER_SIZE, StubLength);
+  WriteUnaligned32 (NewDsdt + 4, NewLength);
+  NewDsdt[9] = 0;
+  Sum = 0;
+  for (Index = 0; Index < NewLength; ++Index) {
+    Sum = (UINT8)(Sum + NewDsdt[Index]);
+  }
+  NewDsdt[9] = (UINT8)(0 - Sum);
+
+  WriteUnaligned32 (Fadt + BC250_FADT_DSDT_OFFSET, (UINT32)NewAddress);
+  if (FadtLength >= BC250_FADT_X_DSDT_MIN_LEN) {
+    WriteUnaligned64 (Fadt + BC250_FADT_X_DSDT_OFFSET, (UINT64)NewAddress);
+  }
+  Fadt[9] = 0;
+  Sum = 0;
+  for (Index = 0; Index < FadtLength; ++Index) {
+    Sum = (UINT8)(Sum + Fadt[Index]);
+  }
+  Fadt[9] = (UINT8)(0 - Sum);
+
+  mCstubDbg.XDsdtReadBack = 0;
+  if (FadtLength >= BC250_FADT_X_DSDT_MIN_LEN) {
+    mCstubDbg.XDsdtReadBack = ReadUnaligned64 (Fadt + BC250_FADT_X_DSDT_OFFSET);
+  }
+  mCstubDbg.Dsdt32ReadBack = ReadUnaligned32 (Fadt + BC250_FADT_DSDT_OFFSET);
+  if (mCstubDbg.XDsdtReadBack != (UINT64)NewAddress &&
+      mCstubDbg.Dsdt32ReadBack != (UINT32)NewAddress) {
+    Status = EFI_WRITE_PROTECTED;
+    Stage  = 10;
+    goto Done;
+  }
+
+  DEBUG ((DEBUG_INFO,
+    "ACPIAutoInject: DSDT CSTUB appended (%u -> %u bytes) at 0x%08x, FADT rewritten\n",
+    DsdtLength, NewLength, (UINT32)NewAddress));
+  mDsdtCstubPatched = TRUE;
+  Stage = 11;
+
+Done:
+  SaveCstubDbg (Stage, Status);
+  return Status;
+}
+
+STATIC
+EFI_STATUS
+SuppressBrokenCpuSsdt (
+  VOID
+  )
+{
+  VOID    *Rsdp;
+  UINT8   *Rsdp8;
+  UINT8   *Table;
+  UINT64  Xsdt;
+  UINT32  Rsdt;
+  UINT32  Length;
+  UINT32  TableLength;
+  UINTN   Entries;
+  UINTN   Index;
+  UINT64  Entry;
+  UINT8   *T;
+  UINT8   Sum;
+  UINT32  I;
+
+  Rsdp = FindAcpiRsdp ();
+  if (Rsdp == NULL) {
+    SaveCstubDbg (40, EFI_NOT_FOUND);
+    return EFI_NOT_FOUND;
+  }
+  Rsdp8 = (UINT8 *)Rsdp;
+  mCstubDbg.Rsdp = (UINT64)(UINTN)Rsdp;
+
+  for (I = 0; I < 2; ++I) {
+    if (I == 0) {
+      if (Rsdp8[15] < 2) {
+        continue;
+      }
+      Xsdt = ReadUnaligned64 (Rsdp8 + 24);
+      if (Xsdt == 0) {
+        continue;
+      }
+      Table = (UINT8 *)(UINTN)Xsdt;
+      if (CompareMem (Table, "XSDT", 4) != 0) {
+        continue;
+      }
+      Length = ReadUnaligned32 (Table + 4);
+      Entries = (Length - BC250_ACPI_HEADER_SIZE) / 8;
+      for (Index = 0; Index < Entries; ++Index) {
+        Entry = ReadUnaligned64 (Table + BC250_ACPI_HEADER_SIZE + Index * 8);
+        if (Entry == 0) {
+          continue;
+        }
+        T = (UINT8 *)(UINTN)Entry;
+        if (CompareMem (T, "SSDT", 4) == 0 &&
+            T[10] == 'A' && T[11] == 'M' && T[12] == 'D' &&
+            CompareMem (T + 16, "AMD CPU", 7) == 0) {
+          TableLength = ReadUnaligned32 (T + 4);
+          if (TableLength < BC250_ACPI_HEADER_SIZE || TableLength > 0x10000U) {
+            continue;
+          }
+          CopyMem (T, "OEMX", 4);
+          T[9] = 0;
+          Sum = 0;
+          for (UINT32 J = 0; J < TableLength; ++J) {
+            Sum = (UINT8)(Sum + T[J]);
+          }
+          T[9] = (UINT8)(0 - Sum);
+          mCstubDbg.NewLength = TableLength;
+          mCstubDbg.Fadt = Entry;
+          SaveCstubDbg (41, EFI_SUCCESS);
+          return EFI_SUCCESS;
+        }
+      }
+    } else {
+      Rsdt = ReadUnaligned32 (Rsdp8 + 16);
+      if (Rsdt == 0) {
+        continue;
+      }
+      Table = (UINT8 *)(UINTN)Rsdt;
+      if (CompareMem (Table, "RSDT", 4) != 0) {
+        continue;
+      }
+      Length = ReadUnaligned32 (Table + 4);
+      Entries = (Length - BC250_ACPI_HEADER_SIZE) / 4;
+      for (Index = 0; Index < Entries; ++Index) {
+        Entry = ReadUnaligned32 (Table + BC250_ACPI_HEADER_SIZE + Index * 4);
+        if (Entry == 0) {
+          continue;
+        }
+        T = (UINT8 *)(UINTN)Entry;
+        if (CompareMem (T, "SSDT", 4) == 0 &&
+            T[10] == 'A' && T[11] == 'M' && T[12] == 'D' &&
+            CompareMem (T + 16, "AMD CPU", 7) == 0) {
+          TableLength = ReadUnaligned32 (T + 4);
+          if (TableLength < BC250_ACPI_HEADER_SIZE || TableLength > 0x10000U) {
+            continue;
+          }
+          CopyMem (T, "OEMX", 4);
+          T[9] = 0;
+          Sum = 0;
+          for (UINT32 J = 0; J < TableLength; ++J) {
+            Sum = (UINT8)(Sum + T[J]);
+          }
+          T[9] = (UINT8)(0 - Sum);
+          mCstubDbg.NewLength = TableLength;
+          mCstubDbg.Fadt = Entry;
+          SaveCstubDbg (41, EFI_SUCCESS);
+          return EFI_SUCCESS;
+        }
+      }
+    }
+  }
+
+  SaveCstubDbg (42, EFI_NOT_FOUND);
+  return EFI_NOT_FOUND;
+}
+
 /**
   ACPI table protocol notification callback.
 
@@ -242,6 +669,7 @@ OnAcpiTableProtocolReady (
   BC250_ACPI_BLOB               SelectedBlobs[BC250_MAX_ACPI_TABLES];
   UINTN                         SelectedCount;
   BOOLEAN                       AcpiPatchEnabled;
+  UINT8                         AcpiPatch;
   BC250_ACPI_AUTO_INJECT_CONTEXT *Context;
 
   Context = (BC250_ACPI_AUTO_INJECT_CONTEXT *)ContextPtr;
@@ -257,7 +685,8 @@ OnAcpiTableProtocolReady (
   }
 
   AcpiPatchEnabled = FALSE;
-  Status = GetAcpiPatchEnabled (&AcpiPatchEnabled);
+  AcpiPatch = 0;
+  Status = GetAcpiPatchEnabled (&AcpiPatchEnabled, &AcpiPatch);
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_WARN, "BC250DXEv3ACPIAutoInjectDxe: ACPI patch gate unavailable, skipping\n"));
     return;
@@ -308,6 +737,33 @@ OnAcpiTableProtocolReady (
   }
 
   Context->TablesInstalled = TRUE;
+
+  //
+  // Optional DSDT namespace repair (AcpiPatch bit 1).  Disabled by default:
+  // on this firmware the ACPI table protocol owns the final DSDT/FADT copies,
+  // and a post-install override was observed to break the OS boot.  Bit 0
+  // alone keeps the proven P/C-state power-management injection.
+  //
+  if ((AcpiPatch & 0x02U) != 0) {
+    Status = PatchDsdtCstub ();
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_WARN,
+        "BC250DXEv3ACPIAutoInjectDxe: DSDT CSTUB patch failed: %r\n", Status));
+    }
+  } else {
+    ZeroMem (&mCstubDbg, sizeof (mCstubDbg));
+    SaveCstubDbg (30, EFI_UNSUPPORTED);
+    DEBUG ((DEBUG_INFO, "BC250DXEv3ACPIAutoInjectDxe: DSDT CSTUB disabled (bit1 clear)\n"));
+  }
+
+  if ((AcpiPatch & 0x04U) != 0) {
+    Status = SuppressBrokenCpuSsdt ();
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_WARN,
+        "BC250DXEv3ACPIAutoInjectDxe: AMD CPU SSDT suppress failed: %r\n", Status));
+    }
+  }
+
   if (Context->Event != NULL) {
     gBS->CloseEvent (Context->Event);
     Context->Event = NULL;

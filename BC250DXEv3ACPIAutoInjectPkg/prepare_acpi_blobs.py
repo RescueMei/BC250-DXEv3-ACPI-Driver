@@ -40,6 +40,23 @@ def write_generated_sources() -> list[tuple[str, str, Path]]:
         full = f'''DefinitionBlock ("", "SSDT", 2, "BC25", "C3PAIR{pair}", 1)\n{{\n{cstate_ext}\n    Scope (\\_PR.P{p}) {{ Method (_CST, 0, NotSerialized) {{ Return (\\PCST ()) }} }}\n    Scope (\\_PR.P{q}) {{ Method (_CST, 0, NotSerialized) {{ Return (\\PCST ()) }} }}\n}}\n'''
         add(f'FullCstatePair{pair}', f'CSTATE-PAIR-3-{pair}', f'SSDT-CSTATE-PAIR-3-{pair}.dsl', full)
 
+    # DSDT append payload: inert namespace targets for the firmware SSDT1
+    # (AMD CPU), which scopes \_PR.C000..C00F as Devices although the DSDT only
+    # defines Processor(P000..P00F).  The driver appends this table's AML body
+    # (after the 36-byte SSDT header) to a copy of the DSDT.
+    cstub = [
+        'DefinitionBlock ("", "SSDT", 2, "BC25", "CSTUB", 1)',
+        '{',
+        '    Scope (\\_PR)',
+        '    {',
+    ]
+    for index in range(16):
+        cstub.append(
+            f'        Device (C{index:03X}) {{ Name (_HID, "BC25C000") Name (_UID, 0x{index:X}) }}'
+        )
+    cstub += ['    }', '}', '']
+    add('Cstub', 'CSTUB', 'SSDT-CSTUB.dsl', '\n'.join(cstub))
+
     tables.append(('Ptswak', 'SSDT-PTSWAK', TABLE_ROOT / 'Common' / 'SSDT-PTSWAK.dsl'))
     return tables
 
