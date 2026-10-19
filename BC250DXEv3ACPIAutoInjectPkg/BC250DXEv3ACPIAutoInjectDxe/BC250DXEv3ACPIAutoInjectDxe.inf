@@ -30,9 +30,5 @@
   gEfiVariableArchProtocolGuid
   gEfiVariableWriteArchProtocolGuid
 
-[Guids]
-  gEfiAcpiTableGuid
-  gEfiAcpi20TableGuid
-
 [Depex]
   gEfiVariableArchProtocolGuid AND gEfiVariableWriteArchProtocolGuid AND gEfiAcpiTableProtocolGuid

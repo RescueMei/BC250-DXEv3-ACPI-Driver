@@ -27,21 +27,6 @@ The driver consumes the `MeiMeiDXEv3AcpiVar` variable defined by the BC250-DXEv3
 
 The injection is gated by the `AcpiPatch` byte at offset 0 of the 1-byte `ACPI_CONFIG` structure. If the variable does not exist (the menu driver's "all zeros" default), the tables are not injected.
 
-### AcpiPatch bits
-
-| Bit | Value | Meaning |
-| --- | --- | --- |
-| 0 | `0x01` | Install the P/C-state SSDTs. This is the useful default: it restores `acpi-cpufreq` and `cpuidle` on BIOS P3.00. |
-| 1 | `0x02` | Experimental DSDT `\_PR.C000..C00F` stub override. Disabled by default: on this firmware the ACPI table protocol owns the final DSDT/FADT copies and a post-install override was observed to break the OS boot. |
-| 2 | `0x04` | Experimental suppression of the firmware `AMD CPU` SSDT. Disabled by default: post-install table edits are reverted before the OS reads them on this firmware. |
-
-`AcpiPatch = 0x01` is the recommended setting.
-
-### Known firmware issue: `\_PR.C000..C00F`
-
-BIOS P3.00 ships an `AMD CPU` SSDT that scopes `\_PR.C000..C00F` as Devices, but its DSDT only defines `Processor(P000..P00F)`. The kernel therefore logs 16 `AE_NOT_FOUND` errors while loading that SSDT. The missing objects are only used by that SSDT for redundant `_CST`/`_CSD` data; the driver's P/C-state SSDTs attach the working C-states to the real `P000..P00F` processors. The errors are cosmetic. Attempts to repair the namespace by editing the final DSDT/FADT or the `AMD CPU` SSDT after `EFI_ACPI_TABLE_PROTOCOL` installation are reverted by the firmware (and the DSDT pointer override can prevent the OS from booting), so they are gated off.
-
-
 ## Injected ACPI tables
 
 ### Injected table groups
