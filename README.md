@@ -13,7 +13,6 @@ configuration. It targets the BC-250 / BIOS 3.00 platform.
 | Produces | no MeiMeiDXEv3 protocol |
 | Consumes | `MeiMeiDXEv3AcpiVar`, `EFI_ACPI_TABLE_PROTOCOL`, SMN `0x0115A870` |
 | Configuration | `MeiMeiDXEv3AcpiVar`, 1 byte |
-| SMU SRAM | none |
 | Compliance | [COMPLIANCE.md](COMPLIANCE.md) |
 
 ## Dependencies
@@ -56,11 +55,6 @@ normal boot.
 
 No MeiMeiDXEv3 protocol is produced. The driver consumes the standard
 `gEfiAcpiTableProtocolGuid` to install and later uninstall the tables.
-
-## SMU SRAM placement
-
-None. The driver only reads the core-presence register. See
-[SMU_MEMORY_MAP.md](https://github.com/RescueMei/BC250-DXEv3-Shared/blob/main/docs/SMU_MEMORY_MAP.md).
 
 ## Build
 

@@ -9,7 +9,6 @@ Checklist and evidence:
 - [x] Configuration structs/constants come from the shared package; no local duplicates.
 - [x] Public protocol copies match the provider ABI; drift check passed.
 - [x] Driver-owned variable names/layouts documented.
-- [x] SMU SRAM allocations match `docs/SMU_MEMORY_MAP.md`; no overlap.
 - [x] Depex is correct; public protocol is installed unconditionally.
 - [x] Feature-disabled path performs no feature writes.
 - [x] Missing/malformed config is rejected safely; boot continues.
@@ -33,10 +32,6 @@ Checklist and evidence:
 Produces no MeiMeiDXEv3 protocol; it consumes the standard ACPI table protocol.
 
 Depex: `gEfiVariableArchProtocolGuid AND gEfiVariableWriteArchProtocolGuid AND gEfiAcpiTableProtocolGuid`.
-
-## SMU map
-
-Owns no SMU SRAM; it only reads the hardware mask register.
 
 ## Write verification
 
