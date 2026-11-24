@@ -39,19 +39,9 @@
 // Core-mask register containing one enable bit per physical core.
 #define MASK_REG                    0x0115A870U
 
-//
-// Shared DXEv3 configuration variable owned by the BC250-DXEv3-Menu-Driver.
-// Only the single-byte AcpiPatch field (offset 0) is consumed.
-//
-#define MEIMEIDXEV3_ACPI_VAR_NAME   L"MeiMeiDXEv3AcpiVar"
+#include <Config/MeiMeiDXEv3Config.h>
 
-typedef struct {
-  UINT8  AcpiPatch;
-} ACPI_CONFIG;
-
-STATIC EFI_GUID mMeiMeiDXEv3ConfigVarGuid = {
-  0x49CC168D, 0xE8B0, 0x4613, { 0xA8, 0x07, 0x16, 0x96, 0x99, 0x86, 0x72, 0x6F }
-};
+STATIC EFI_GUID mMeiMeiDXEv3ConfigVarGuid = MEIMEIDXEV3_CONFIG_VAR_GUID;
 
 #define BC250_PCI_SEGMENT_ADDRESS(Offset) \
   PCI_SEGMENT_LIB_ADDRESS (BC250_HOST_PCI_SEGMENT, BC250_HOST_PCI_BUS, BC250_HOST_PCI_DEVICE, BC250_HOST_PCI_FUNCTION, (Offset))
@@ -130,6 +120,7 @@ GetAcpiPatchEnabled (
   EFI_STATUS   Status;
   UINTN        DataSize;
   ACPI_CONFIG  Config;
+  UINT32       Attributes;
 
   *AcpiPatchEnabled = FALSE;
   ZeroMem (&Config, sizeof (Config));
@@ -138,7 +129,7 @@ GetAcpiPatchEnabled (
   Status = gRT->GetVariable (
                   MEIMEIDXEV3_ACPI_VAR_NAME,
                   &mMeiMeiDXEv3ConfigVarGuid,
-                  NULL,
+                  &Attributes,
                   &DataSize,
                   &Config
                   );
@@ -158,6 +149,13 @@ GetAcpiPatchEnabled (
     DEBUG ((DEBUG_WARN, "BC250DXEv3ACPIAutoInjectDxe: failed to read %s: %r\n",
             MEIMEIDXEV3_ACPI_VAR_NAME, Status));
     return Status;
+  }
+
+  if (Attributes != MEIMEIDXEV3_CONFIG_VAR_ATTRIBUTES) {
+    DEBUG ((DEBUG_WARN,
+            "BC250DXEv3ACPIAutoInjectDxe: %s has attributes 0x%x (want 0x%x), ACPI patch disabled\n",
+            MEIMEIDXEV3_ACPI_VAR_NAME, Attributes, MEIMEIDXEV3_CONFIG_VAR_ATTRIBUTES));
+    return EFI_SECURITY_VIOLATION;
   }
 
   *AcpiPatchEnabled = (BOOLEAN)(Config.AcpiPatch != 0U);
