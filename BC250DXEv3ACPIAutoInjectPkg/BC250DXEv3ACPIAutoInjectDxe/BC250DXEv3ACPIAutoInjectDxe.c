@@ -39,15 +39,7 @@
 // Core-mask register containing one enable bit per physical core.
 #define MASK_REG                    0x0115A870U
 
-//
-// Shared DXEv3 configuration variable owned by the BC250-DXEv3-Menu-Driver.
-// Only the single-byte AcpiPatch field (offset 0) is consumed.
-//
-#define MEIMEIDXEV3_ACPI_VAR_NAME   L"MeiMeiDXEv3AcpiVar"
-
-typedef struct {
-  UINT8  AcpiPatch;
-} ACPI_CONFIG;
+#include <Config/MeiMeiDXEv3Config.h>
 
 STATIC EFI_GUID mMeiMeiDXEv3ConfigVarGuid = {
   0x49CC168D, 0xE8B0, 0x4613, { 0xA8, 0x07, 0x16, 0x96, 0x99, 0x86, 0x72, 0x6F }
