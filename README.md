@@ -74,7 +74,7 @@ Output:
 
 ## Validation
 
-2026-11-24, eight-driver stack, configured ceiling 2100 MHz: `DEPLOY_OK`,
+2026-11-25, nine-driver stack, configured ceiling 2100 MHz: `DEPLOY_OK`,
 actual clock 2100 MHz sustained, 82 C peak, no ring/C2P timeouts, board
 reachable after the workload, and the OS booted with 8 cores / 16 threads.
 See [COMPLIANCE.md](COMPLIANCE.md).
