@@ -40,6 +40,25 @@
 #define MASK_REG                    0x0115A870U
 
 #include <Config/MeiMeiDXEv3Config.h>
+#include <Protocol/MeiMeiDXEv3DriverInfo.h>
+
+//
+// Driver identity reported to the BC250-DXEv3-Driver-Info telemetry driver.
+//
+#define BC250_ACPI_VERSION  MEIMEIDXEV3_MAKE_VERSION (1, 0, 0)
+
+STATIC EFI_HANDLE  mDriverInfoHandle = NULL;
+
+STATIC CONST MEIMEIDXEV3_DRIVER_INFO  mDriverInfo = {
+  MEIMEIDXEV3_DRIVER_INFO_REVISION,
+  sizeof (MEIMEIDXEV3_DRIVER_INFO),
+  L"ACPI",
+  BC250_ACPI_VERSION,
+  { 0xA9981D14, 0x6329, 0x4698, { 0xAD, 0x20, 0x17, 0x3C, 0x43, 0x63, 0xDD, 0x30 } },
+  MEIMEIDXEV3_ACPI_SCHEMA,
+  0,
+  MEIMEIDXEV3_DRIVER_CAP_CONFIG
+};
 
 STATIC EFI_GUID mMeiMeiDXEv3ConfigVarGuid = MEIMEIDXEV3_CONFIG_VAR_GUID;
 
@@ -340,6 +359,22 @@ BC250DXEv3ACPIAutoInjectEntryPoint (
   (VOID)SystemTable;
 
   DEBUG ((DEBUG_INFO, "BC250DXEv3ACPIAutoInjectDxe: entry\n"));
+  //
+  // Publish this driver's identity record for the telemetry driver before any
+  // early return.
+  //
+  if (mDriverInfoHandle == NULL) {
+    Status = gBS->InstallProtocolInterface (
+                    &mDriverInfoHandle,
+                    &gMeiMeiDXEv3DriverInfoProtocolGuid,
+                    EFI_NATIVE_INTERFACE,
+                    (VOID *)&mDriverInfo
+                    );
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_ERROR, "BC250DXEv3ACPIAutoInjectDxe: driver info install failed: %r\n", Status));
+    }
+  }
+
 
   Status = gBS->CreateEvent (
                   EVT_NOTIFY_SIGNAL,

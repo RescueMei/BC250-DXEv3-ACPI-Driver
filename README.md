@@ -53,6 +53,8 @@ normal boot.
 
 ## Protocols
 
+Also publishes `gMeiMeiDXEv3DriverInfoProtocolGuid` with its name, version, module GUID, config schema, and payload version for the `BC250-DXEv3-Driver-Info` telemetry driver.
+
 No MeiMeiDXEv3 protocol is produced. The driver consumes the standard
 `gEfiAcpiTableProtocolGuid` to install and later uninstall the tables.
 
